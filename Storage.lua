@@ -1,63 +1,61 @@
 -- Storage.lua
--- Handles all reading and writing to WowCraftDB (SavedVariables)
+-- Everything that touches WowCraftDB lives here.
+-- WowCraftDB is the SavedVariables table — WoW writes it to disk on logout
+-- so data survives between sessions without us doing anything special.
+--
+-- Data is keyed by "Name-Realm" strings so characters on different realms
+-- don't collide. We call that the playerKey throughout the codebase.
 
 WowCraftStorage = {}
 
--- Called from Core.lua on PLAYER_LOGIN after SavedVariables are loaded
+-- Called on PLAYER_LOGIN once SavedVariables have been loaded by the client
 function WowCraftStorage.Init()
     if not WowCraftDB then
         WowCraftDB = {}
     end
 
-    -- guild member profession data, keyed by "Name-Realm"
+    -- profession/recipe data for each guild member, keyed by playerKey
     if not WowCraftDB.members then
         WowCraftDB.members = {}
     end
 
-    -- when each member's data was last updated, keyed by "Name-Realm"
+    -- unix timestamps of each member's last sync, keyed by playerKey
     if not WowCraftDB.lastSeen then
         WowCraftDB.lastSeen = {}
     end
 end
 
--- Returns the full player key "Name-Realm" for the local player
+-- Returns "Name-Realm" for the logged in character
 function WowCraftStorage.GetPlayerKey()
-    local name = UnitName("player")
-    local realm = GetRealmName()
-    return name .. "-" .. realm
+    return UnitName("player") .. "-" .. GetRealmName()
 end
 
--- Saves profession data for a given player key
--- data is a table of professions, see Data.lua for structure
+-- Saves a member's profession/recipe data and stamps the current time
 function WowCraftStorage.SaveMember(playerKey, data)
-    WowCraftDB.members[playerKey] = data
+    WowCraftDB.members[playerKey]  = data
     WowCraftDB.lastSeen[playerKey] = time()
 end
 
--- Returns stored data for a given player key, or nil if not found
 function WowCraftStorage.GetMember(playerKey)
     return WowCraftDB.members[playerKey]
 end
 
--- Returns the full members table
 function WowCraftStorage.GetAllMembers()
     return WowCraftDB.members
 end
 
--- Returns the last seen timestamp for a player key, or nil
 function WowCraftStorage.GetLastSeen(playerKey)
     return WowCraftDB.lastSeen[playerKey]
 end
 
--- Removes a member's data entirely (e.g. if they leave the guild)
 function WowCraftStorage.RemoveMember(playerKey)
-    WowCraftDB.members[playerKey] = nil
+    WowCraftDB.members[playerKey]  = nil
     WowCraftDB.lastSeen[playerKey] = nil
 end
 
--- Wipes all stored data — useful for a full resync
+-- Wipes everything — useful if the data gets into a weird state
 function WowCraftStorage.Reset()
-    WowCraftDB.members = {}
+    WowCraftDB.members  = {}
     WowCraftDB.lastSeen = {}
-    print("|cff00ccff[WowCraft]|r All stored data has been cleared.")
+    print("|cff00ccff[WowCraft]|r All stored data cleared.")
 end

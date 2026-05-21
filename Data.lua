@@ -1,12 +1,20 @@
 -- Data.lua
--- Scans the local player's professions and recipes using the TBC Classic API
--- Hooks into tradeskill window events so scanning happens automatically
--- Note: Enchanting uses the legacy CraftFrame API, not the standard TradeSkill API
+-- Scans the local player's professions and recipes.
+--
+-- The scanning hooks into tradeskill window events rather than running
+-- on a timer, so there's no performance cost when you're just playing normally.
+-- Open a tradeskill window and it scans automatically.
+--
+-- Enchanting is a special case. Blizzard never ported it to the standard
+-- TradeSkill API in Classic — it still uses the old CraftFrame system from
+-- vanilla. That means completely different function names and a different
+-- event to listen for. See OnCraftShow() below.
 
 WowCraftData = {}
 
--- Professions we want to track
-local TRACKED_PROFESSIONS = {
+-- Professions we care about. Fishing has no recipe window so it's excluded.
+-- First Aid excluded by design.
+local TRACKED = {
     ["Alchemy"]        = true,
     ["Blacksmithing"]  = true,
     ["Enchanting"]     = true,
@@ -20,7 +28,9 @@ local TRACKED_PROFESSIONS = {
     ["Cooking"]        = true,
 }
 
--- Professions that have scannable recipe lists via the standard TradeSkill API
+-- These use the standard TradeSkill API and have scannable recipe lists.
+-- Enchanting is handled separately via the CraftFrame API.
+-- Herbalism/Mining/Skinning have no recipes to scan.
 local HAS_RECIPES = {
     ["Alchemy"]        = true,
     ["Blacksmithing"]  = true,
@@ -31,17 +41,14 @@ local HAS_RECIPES = {
     ["Cooking"]        = true,
 }
 
--- Scans all recipes in the open standard tradeskill window
--- Returns a table of recipe names
-local function ScanOpenTradeskill()
+-- Reads every recipe from the currently open standard tradeskill window.
+-- Skips header rows (category labels like "Armor", "Weapons" etc).
+local function ScanTradeskill()
     local recipes = {}
-    local numSkills = GetNumTradeSkills()
+    local total   = GetNumTradeSkills()
+    if not total or total == 0 then return recipes end
 
-    if not numSkills or numSkills == 0 then
-        return recipes
-    end
-
-    for i = 1, numSkills do
+    for i = 1, total do
         local name, skillType = GetTradeSkillInfo(i)
         if name and skillType ~= "header" then
             table.insert(recipes, name)
@@ -51,18 +58,14 @@ local function ScanOpenTradeskill()
     return recipes
 end
 
--- Scans all recipes in the open Enchanting CraftFrame window
--- Uses GetNumCrafts() and GetCraftInfo() which are the correct APIs for Enchanting in TBC
--- Returns a table of recipe names
-local function ScanOpenCraftSkill()
+-- Same thing but for the Enchanting CraftFrame.
+-- GetCraftInfo returns slightly different fields to GetTradeSkillInfo.
+local function ScanCraftSkill()
     local recipes = {}
-    local numCrafts = GetNumCrafts()
+    local total   = GetNumCrafts()
+    if not total or total == 0 then return recipes end
 
-    if not numCrafts or numCrafts == 0 then
-        return recipes
-    end
-
-    for i = 1, numCrafts do
+    for i = 1, total do
         local name, _, skillType = GetCraftInfo(i)
         if name and skillType ~= "header" then
             table.insert(recipes, name)
@@ -72,13 +75,13 @@ local function ScanOpenCraftSkill()
     return recipes
 end
 
--- Saves profession and recipe data for the given profession name, level and recipes
-local function SaveProfessionData(profName, level, maxLevel, recipes)
+-- Writes profession + recipe data into storage for the local player.
+local function Save(profName, level, maxLevel, recipes)
     local playerKey = WowCraftStorage.GetPlayerKey()
-    local existing = WowCraftStorage.GetMember(playerKey) or {}
+    local existing  = WowCraftStorage.GetMember(playerKey) or {}
 
     if not existing.professions then existing.professions = {} end
-    if not existing.recipes then existing.recipes = {} end
+    if not existing.recipes     then existing.recipes     = {} end
 
     existing.professions[profName] = {
         level    = level,
@@ -87,51 +90,45 @@ local function SaveProfessionData(profName, level, maxLevel, recipes)
 
     if recipes then
         existing.recipes[profName] = recipes
-        print("|cff00ccff[WowCraft]|r Scanned " .. profName .. ": " .. level .. "/" .. maxLevel .. " — " .. #recipes .. " recipes.")
+        print("|cff00ccff[WowCraft]|r Scanned " .. profName
+            .. " " .. level .. "/" .. maxLevel
+            .. " — " .. #recipes .. " recipes.")
     else
-        print("|cff00ccff[WowCraft]|r Scanned " .. profName .. ": " .. level .. "/" .. maxLevel .. ".")
+        print("|cff00ccff[WowCraft]|r Scanned " .. profName
+            .. " " .. level .. "/" .. maxLevel .. ".")
     end
 
     WowCraftStorage.SaveMember(playerKey, existing)
 end
 
--- Called when a standard tradeskill window opens (TRADE_SKILL_SHOW)
+-- Fires when a standard tradeskill window opens (TRADE_SKILL_SHOW).
 function WowCraftData.OnTradeskillShow()
     local profName, level, maxLevel = GetTradeSkillLine()
 
     if not profName or profName == "UNKNOWN" then
-        print("|cff00ccff[WowCraft]|r Could not identify this profession window.")
+        print("|cff00ccff[WowCraft]|r Couldn't read this profession window.")
         return
     end
 
-    if not TRACKED_PROFESSIONS[profName] then
-        return
-    end
+    if not TRACKED[profName] then return end
 
-    local recipes = nil
-    if HAS_RECIPES[profName] then
-        recipes = ScanOpenTradeskill()
-    end
-
-    SaveProfessionData(profName, level, maxLevel, recipes)
+    Save(profName, level, maxLevel, HAS_RECIPES[profName] and ScanTradeskill() or nil)
 end
 
--- Called when the Enchanting CraftFrame window opens (CRAFT_SHOW)
--- Enchanting uses a completely separate API from all other professions in TBC Classic:
--- GetNumCrafts() instead of GetNumTradeSkills()
--- GetCraftInfo() instead of GetTradeSkillInfo()
--- GetCraftLine() does not exist on this client so we hardcode the profession name
+-- Fires when the Enchanting window opens (CRAFT_SHOW).
+-- GetCraftLine() doesn't exist on the TBC Anniversary client so we
+-- hardcode the name. Enchanting is the only thing that uses CraftFrame
+-- so this is safe. Level is also hardcoded to 375 since the API won't
+-- give us the real value — something to revisit if Blizzard ever fixes it.
 function WowCraftData.OnCraftShow()
-    local recipes = ScanOpenCraftSkill()
-    -- GetCraftLine() is not available on TBC Anniversary
-    -- Enchanting is the only profession using CraftFrame so hardcoding is safe
-    SaveProfessionData("Enchanting", 375, 375, recipes)
+    Save("Enchanting", 375, 375, ScanCraftSkill())
 end
 
--- Returns a summary of what has been scanned so far for the local player
+-- Returns whatever we've scanned for the local player so far.
+-- Sync.lua calls this when broadcasting to the guild.
 function WowCraftData.GetLocalSnapshot()
     local playerKey = WowCraftStorage.GetPlayerKey()
-    local stored = WowCraftStorage.GetMember(playerKey)
+    local stored    = WowCraftStorage.GetMember(playerKey)
 
     if not stored then
         local fresh = { professions = {}, recipes = {} }
