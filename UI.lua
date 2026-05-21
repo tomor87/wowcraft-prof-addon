@@ -4,18 +4,20 @@
 -- Left panel lists everyone who has synced data.
 -- Right panel shows their professions and recipes when you click them.
 -- Search bar at the top finds a recipe across every guild member at once.
---
--- The recipe list uses a proper scrolling child frame so it handles
--- people with hundreds of recipes without falling apart.
 
 WowCraftUI = {}
 
-local frame      = nil
-local memberList = nil
-local recipePanel  = nil
-local searchBox  = nil
-local selectedKey  = nil
+local frame         = nil
+local memberList    = nil
+local recipePanel   = nil
+local searchBox     = nil
+local selectedKey   = nil
 local memberButtons = {}
+
+-- FontStrings can't be destroyed once created, so we keep a pool of them
+-- and hide/show as needed rather than creating new ones every time.
+local linePool    = {}
+local activeLines = {}
 
 local FRAME_W  = 700
 local FRAME_H  = 500
@@ -24,7 +26,6 @@ local BUTTON_H = 28
 local HEADER_H = 36
 local PAD      = 10
 
--- colours
 local C_BLUE  = "|cff00ccff"
 local C_WHITE = "|cffffffff"
 local C_GREY  = "|cff999999"
@@ -33,54 +34,67 @@ local C_GREEN = "|cff00ff66"
 local C_END   = "|r"
 
 -- ============================================================
--- Small utilities
+-- Line pool
+-- WoW FontStrings can't be garbage collected so we recycle them.
+-- AcquireLine() grabs one from the pool or creates a new one.
+-- ReleaseLines() hides them all and puts them back in the pool.
 -- ============================================================
 
-local function FirstName(playerKey)
-    -- "Tomor-Spineshatter" -> "Tomor"
-    return playerKey:match("^([^%-]+)") or playerKey
+local function AcquireLine()
+    local line
+    if #linePool > 0 then
+        line = table.remove(linePool)
+    else
+        line = recipePanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        line:SetWidth(FRAME_W - LEFT_W - PAD * 4 - 16)
+        line:SetJustifyH("LEFT")
+        line:SetWordWrap(false)
+    end
+    line:Show()
+    table.insert(activeLines, line)
+    return line
 end
 
-local function TimeSince(ts)
-    if not ts then return C_GREY .. "never synced" .. C_END end
-    local diff = time() - ts
-    if diff < 60    then return C_GREEN .. "just now" .. C_END end
-    if diff < 3600  then return C_GREEN .. math.floor(diff / 60) .. "m ago" .. C_END end
-    if diff < 86400 then return C_GREY  .. math.floor(diff / 3600) .. "h ago" .. C_END end
-    return C_GREY .. math.floor(diff / 86400) .. "d ago" .. C_END
+local function ReleaseLines()
+    for _, line in ipairs(activeLines) do
+        line:Hide()
+        line:SetText("")
+        table.insert(linePool, line)
+    end
+    activeLines = {}
 end
 
 -- ============================================================
 -- Recipe panel
--- Clears and rebuilds the right hand side for a given player.
--- Uses a growing frame inside a ScrollFrame so long lists scroll
--- properly rather than getting clipped.
 -- ============================================================
 
-local function ClearRecipePanel()
-    if not recipePanel then return end
-    local children = { recipePanel:GetChildren() }
-    for _, child in ipairs(children) do child:Hide() end
-    -- also clear font strings
-    recipePanel:SetHeight(10)
-end
-
 local function AddLine(text, yAcc)
-    local fs = recipePanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    fs:SetPoint("TOPLEFT", recipePanel, "TOPLEFT", PAD, -yAcc)
-    fs:SetWidth(FRAME_W - LEFT_W - PAD * 4 - 16)
-    fs:SetJustifyH("LEFT")
-    fs:SetWordWrap(false)
-    fs:SetText(text)
-    return yAcc + fs:GetStringHeight() + 4
+    local line = AcquireLine()
+    line:ClearAllPoints()
+    line:SetPoint("TOPLEFT", recipePanel, "TOPLEFT", PAD, -yAcc)
+    line:SetText(text)
+    return yAcc + line:GetStringHeight() + 4
 end
 
 local function PopulateRecipes(playerKey)
-    ClearRecipePanel()
+    ReleaseLines()
 
     local data     = WowCraftStorage.GetMember(playerKey)
     local lastSeen = WowCraftStorage.GetLastSeen(playerKey)
     local y        = PAD
+
+    local function TimeSince(ts)
+        if not ts then return C_GREY .. "never synced" .. C_END end
+        local diff = time() - ts
+        if diff < 60    then return C_GREEN .. "just now"                          .. C_END end
+        if diff < 3600  then return C_GREEN .. math.floor(diff / 60)   .. "m ago" .. C_END end
+        if diff < 86400 then return C_GREY  .. math.floor(diff / 3600) .. "h ago" .. C_END end
+        return C_GREY .. math.floor(diff / 86400) .. "d ago" .. C_END
+    end
+
+    local function FirstName(key)
+        return key:match("^([^%-]+)") or key
+    end
 
     if not data then
         y = AddLine(C_GREY .. "No data stored for this player yet." .. C_END, y)
@@ -88,7 +102,6 @@ local function PopulateRecipes(playerKey)
         return
     end
 
-    -- name + last sync time as a header
     y = AddLine(C_GOLD .. FirstName(playerKey) .. C_END .. "   " .. TimeSince(lastSeen), y)
     y = y + 6
 
@@ -98,7 +111,6 @@ local function PopulateRecipes(playerKey)
         return
     end
 
-    -- sort professions so the order is consistent
     local profNames = {}
     for name in pairs(data.professions) do table.insert(profNames, name) end
     table.sort(profNames)
@@ -131,8 +143,6 @@ end
 
 -- ============================================================
 -- Search
--- Scans every stored member for a matching recipe name and
--- lists results in the right panel.
 -- ============================================================
 
 local function DoSearch(query)
@@ -143,11 +153,11 @@ local function DoSearch(query)
         return
     end
 
-    ClearRecipePanel()
+    ReleaseLines()
 
-    local y      = PAD
-    local found  = false
-    local all    = WowCraftStorage.GetAllMembers()
+    local y     = PAD
+    local found = false
+    local all   = WowCraftStorage.GetAllMembers()
 
     local keys = {}
     for k in pairs(all) do table.insert(keys, k) end
@@ -171,7 +181,8 @@ local function DoSearch(query)
             if #hits > 0 then
                 found = true
                 table.sort(hits)
-                y = AddLine(C_BLUE .. FirstName(playerKey) .. C_END, y)
+                local name = playerKey:match("^([^%-]+)") or playerKey
+                y = AddLine(C_BLUE .. name .. C_END, y)
                 for _, hit in ipairs(hits) do
                     y = AddLine("   " .. C_WHITE .. hit .. C_END, y)
                 end
@@ -220,7 +231,6 @@ local function PopulateMemberList()
     for k in pairs(all) do table.insert(keys, k) end
     table.sort(keys)
 
-    -- put yourself first
     for i, k in ipairs(keys) do
         if k == myKey then
             table.remove(keys, i)
@@ -236,7 +246,7 @@ local function PopulateMemberList()
         btn:SetPoint("TOPLEFT", memberList, "TOPLEFT", PAD / 2, -yOffset)
         btn.playerKey = playerKey
 
-        local label = FirstName(playerKey)
+        local label = playerKey:match("^([^%-]+)") or playerKey
         if playerKey == myKey then
             label = label .. " " .. C_GREY .. "(you)" .. C_END
         end
@@ -251,7 +261,6 @@ local function PopulateMemberList()
 
     memberList:SetHeight(math.max(yOffset, FRAME_H))
 
-    -- keep the selected member highlighted after a refresh
     if selectedKey and WowCraftStorage.GetMember(selectedKey) then
         SelectMember(selectedKey)
     elseif #keys > 0 then
@@ -260,8 +269,7 @@ local function PopulateMemberList()
 end
 
 -- ============================================================
--- Build the window
--- Only called once, the first time /wcshow is used.
+-- Build the window (called once on first /wcshow)
 -- ============================================================
 
 local function BuildFrame()
@@ -304,7 +312,7 @@ local function BuildFrame()
         self:ClearFocus()
     end)
 
-    -- sync / request buttons sit to the right of the search bar
+    -- sync and request buttons
     local syncBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
     syncBtn:SetSize(70, 24)
     syncBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -PAD - 16, -HEADER_H - 3)
@@ -322,7 +330,7 @@ local function BuildFrame()
         WowCraftSync.RequestAllData()
     end)
 
-    -- left scroll + member list frame
+    -- left scroll + member list
     local leftScroll = CreateFrame("ScrollFrame", "WowCraftLeftScroll", frame, "UIPanelScrollFrameTemplate")
     leftScroll:SetPoint("TOPLEFT",    frame, "TOPLEFT",    PAD, -HEADER_H - 40)
     leftScroll:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", PAD,  PAD)
@@ -333,14 +341,14 @@ local function BuildFrame()
     memberList:SetHeight(FRAME_H)
     leftScroll:SetScrollChild(memberList)
 
-    -- divider line between panels
+    -- divider
     local divider = frame:CreateTexture(nil, "ARTWORK")
     divider:SetColorTexture(0.3, 0.3, 0.3, 0.8)
     divider:SetPoint("TOPLEFT",    frame, "TOPLEFT",    LEFT_W + PAD * 2 + 2, -HEADER_H - 40)
     divider:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", LEFT_W + PAD * 2 + 2,  PAD)
     divider:SetWidth(1)
 
-    -- right scroll + recipe panel frame
+    -- right scroll + recipe panel
     local rightScroll = CreateFrame("ScrollFrame", "WowCraftRightScroll", frame, "UIPanelScrollFrameTemplate")
     rightScroll:SetPoint("TOPLEFT",     frame, "TOPLEFT",     LEFT_W + PAD * 3 + 4, -HEADER_H - 40)
     rightScroll:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -PAD - 16, PAD)
@@ -366,8 +374,6 @@ function WowCraftUI.Toggle()
     end
 end
 
--- Called by Sync.lua when new data arrives so the window updates
--- automatically if it happens to be open
 function WowCraftUI.Refresh()
     if frame and frame:IsShown() then
         PopulateMemberList()
