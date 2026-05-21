@@ -1,0 +1,11 @@
+# WoW generated files
+*.bak
+*.old
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# Windows
+Thumbs.db
+Desktop.ini
