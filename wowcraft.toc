@@ -1,0 +1,12 @@
+## Interface: 20505
+## Title: WowCraft
+## Notes: Guild profession tracker
+## Author: Tom Martin-Hodgson
+## Version: 0.1
+## SavedVariables: WowCraftDB
+
+Storage.lua
+Data.lua
+Sync.lua
+Core.lua
+UI.lua
