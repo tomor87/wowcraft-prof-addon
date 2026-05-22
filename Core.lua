@@ -83,12 +83,3 @@ end
 SlashCmdList["WCRESET"] = function()
     WowCraftStorage.Reset()
 end
-
--- debug: print any WowCraft addon messages we receive
-local debugFrame = CreateFrame("Frame")
-debugFrame:RegisterEvent("CHAT_MSG_ADDON")
-debugFrame:SetScript("OnEvent", function(self, event, prefix, msg, channel, sender)
-    if prefix == "WowCraft" then
-        print("|cffff0000[WowCraft DEBUG]|r got message from " .. sender .. ": " .. msg:sub(1, 50))
-    end
-end)

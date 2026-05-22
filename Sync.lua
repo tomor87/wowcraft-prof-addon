@@ -208,10 +208,14 @@ function WowCraftSync.BroadcastMyData()
     local chunks     = ChunkString(serialised)
     local total      = #chunks
 
-    -- stagger sends by 0.1s each so WoW's rate limiter doesn't drop packets
-    for i, chunk in ipairs(chunks) do
-        local msg = playerKey .. SEP .. total .. SEP .. i .. SEP .. chunk
-        C_Timer.After(i * 0.1, function()
+    -- send chunk 1 immediately so the receiver knows a fresh transmission is starting
+    -- then stagger the rest 0.15s apart so WoW's rate limiter doesn't drop packets
+    local msg1 = playerKey .. SEP .. total .. SEP .. "1" .. SEP .. chunks[1]
+    SendGuild(msg1)
+
+    for i = 2, total do
+        local msg = playerKey .. SEP .. total .. SEP .. i .. SEP .. chunks[i]
+        C_Timer.After((i - 1) * 0.15, function()
             SendGuild(msg)
         end)
     end
@@ -275,8 +279,12 @@ function WowCraftSync.OnAddonMessage(msg, channel, sender)
     if not playerKey or not total or not index or not chunk then return end
     if playerKey == WowCraftStorage.GetPlayerKey() then return end  -- ignore our own broadcasts
 
-    -- chunk 1 always means a fresh transmission, clear any stale buffer
-    if index == 1 or not incoming[playerKey] then
+    -- chunk 1 always signals a fresh transmission so wipe any stale buffer
+    if index == 1 then
+        incoming[playerKey] = { chunks = {}, total = total }
+    end
+
+    if not incoming[playerKey] then
         incoming[playerKey] = { chunks = {}, total = total }
     end
 
