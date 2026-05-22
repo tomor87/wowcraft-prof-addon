@@ -274,6 +274,8 @@ local function ProcessIncomingData(playerKey, data)
 end
 
 function WowCraftSync.OnAddonMessage(msg, channel, sender)
+    print("|cffff0000[DEBUG]|r raw msg from " .. tostring(sender) .. ": " .. msg:sub(1, 40))
+
     -- someone is asking for our data
     if msg:sub(1, 7) == "REQUEST" then
         C_Timer.After(math.random(0, 3), function()
@@ -319,7 +321,7 @@ function WowCraftSync.OnAddonMessage(msg, channel, sender)
         end
         local assembled = table.concat(ordered)
         incoming[bufKey] = nil
-
+        print("|cffff0000[DEBUG]|r assembled: " .. assembled:sub(1, 80))
         local data = Deserialise(assembled)
         if data then
             ProcessIncomingData(playerKey, data)
