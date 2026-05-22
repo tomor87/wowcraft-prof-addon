@@ -1,12 +1,12 @@
 -- Sync.lua
 -- Sends and receives profession data between guild members.
 --
--- WoW addon messages have a 255 char limit so we chunk anything larger
--- and reassemble it on the other end. Nothing shows in guild chat,
--- this all happens in the background.
+-- Each profession is sent as its own separate transmission so large
+-- datasets don't collide in the chunk buffer. Enchanting arrives as
+-- one sequence, Leatherworking as another, and so on.
 --
 -- Message format per chunk:
---   playerKey | totalChunks | chunkIndex | data
+--   playerKey | transmissionID | totalChunks | chunkIndex | data
 --
 -- Discord note:
 -- If you want to pipe this data to Discord later, the easiest route is a
@@ -16,10 +16,12 @@
 
 WowCraftSync = {}
 
-local PREFIX        = "WowCraft"
-local MAX_CHUNK     = 200
-local SEP           = "\031"  -- ASCII unit separator, won't appear in recipe names
-local incoming = {}  -- chunk buffers keyed by playerKey
+local PREFIX    = "WowCraft"
+local MAX_CHUNK = 200
+local SEP       = "\031"  -- ASCII unit separator, won't appear in recipe names
+
+-- incoming buffers keyed by "playerKey|transmissionID"
+local incoming = {}
 
 -- ============================================================
 -- Init
@@ -35,16 +37,11 @@ end
 
 -- ============================================================
 -- Serialisation
---
--- Using a simple key=value pipe format rather than something
--- fancy. Recipe names are plain strings so this is safe enough.
--- Format for a member data table:
---   PROF:Leatherworking:375:375|REC:Leatherworking:Heavy Knothide Armor Kit,Rugged Armor Kit
+-- Each transmission carries one profession's data:
+--   PROF:Leatherworking:375:375|REC:Leatherworking:recipe1,recipe2,...
 -- ============================================================
 
 local function EscapeString(str)
-    -- pipe and colon are our delimiters so escape them if they appear in a value
-    -- In practice recipe names don't contain these but better safe than sorry
     str = str:gsub("\\", "\\\\")
     str = str:gsub("|", "\\|")
     str = str:gsub(":", "\\:")
@@ -53,7 +50,7 @@ local function EscapeString(str)
 end
 
 local function UnescapeString(str)
-    str = str:gsub("\\,", "\001")  -- temp placeholder
+    str = str:gsub("\\,", "\001")
     str = str:gsub("\\:", "\002")
     str = str:gsub("\\|", "\003")
     str = str:gsub("\\\\", "\\")
@@ -63,43 +60,34 @@ local function UnescapeString(str)
     return str
 end
 
-local function Serialise(data)
+-- Serialises a single profession's data into a string
+local function SerialiseProfession(profName, prof, recipes)
     local parts = {}
 
-    -- profession levels
-    if data.professions then
-        for profName, prof in pairs(data.professions) do
-            table.insert(parts, "PROF:"
-                .. EscapeString(profName) .. ":"
-                .. (prof.level or 0) .. ":"
-                .. (prof.maxLevel or 375))
-        end
-    end
+    table.insert(parts, "PROF:"
+        .. EscapeString(profName) .. ":"
+        .. (prof.level or 0) .. ":"
+        .. (prof.maxLevel or 375))
 
-    -- recipes per profession
-    if data.recipes then
-        for profName, recipes in pairs(data.recipes) do
-            if #recipes > 0 then
-                local escaped = {}
-                for _, r in ipairs(recipes) do
-                    table.insert(escaped, EscapeString(r))
-                end
-                table.insert(parts, "REC:"
-                    .. EscapeString(profName) .. ":"
-                    .. table.concat(escaped, ","))
-            end
+    if recipes and #recipes > 0 then
+        local escaped = {}
+        for _, r in ipairs(recipes) do
+            table.insert(escaped, EscapeString(r))
         end
+        table.insert(parts, "REC:"
+            .. EscapeString(profName) .. ":"
+            .. table.concat(escaped, ","))
     end
 
     return table.concat(parts, "|")
 end
 
+-- Deserialises a single profession transmission back into data
 local function Deserialise(str)
     if not str or str == "" then return nil end
 
     local data = { professions = {}, recipes = {} }
 
-    -- split on | but not escaped \|
     local segments = {}
     local current  = ""
     for i = 1, #str do
@@ -114,7 +102,6 @@ local function Deserialise(str)
     if current ~= "" then table.insert(segments, current) end
 
     for _, segment in ipairs(segments) do
-        -- split on : but not escaped \:
         local fields = {}
         local field  = ""
         for i = 1, #segment do
@@ -142,7 +129,6 @@ local function Deserialise(str)
             local recipeStr = fields[3]
             local recipes   = {}
 
-            -- split recipe list on , but not escaped \,
             local recipeName = ""
             for i = 1, #recipeStr do
                 local c = recipeStr:sub(i, i)
@@ -192,8 +178,26 @@ local function SendGuild(msg)
     end
 end
 
-function WowCraftSync.BroadcastMyData()
+-- Sends one profession as a chunked transmission
+-- txID is a short unique ID so the receiver can tell transmissions apart
+local function SendProfession(playerKey, txID, profName, prof, recipes, delayOffset)
+    local serialised = SerialiseProfession(profName, prof, recipes)
+    local chunks     = ChunkString(serialised)
+    local total      = #chunks
 
+    for i, chunk in ipairs(chunks) do
+        local msg = playerKey .. SEP .. txID .. SEP .. total .. SEP .. i .. SEP .. chunk
+        C_Timer.After(delayOffset + (i - 1) * 0.3, function()
+            SendGuild(msg)
+        end)
+    end
+
+    return total
+end
+
+-- Broadcasts all local profession data to the guild
+-- Each profession is sent as a separate transmission with its own ID
+function WowCraftSync.BroadcastMyData()
     local snapshot  = WowCraftData.GetLocalSnapshot()
     local profCount = 0
     for _ in pairs(snapshot.professions) do profCount = profCount + 1 end
@@ -204,27 +208,31 @@ function WowCraftSync.BroadcastMyData()
     end
 
     local playerKey  = WowCraftStorage.GetPlayerKey()
-    local serialised = Serialise(snapshot)
-    local chunks     = ChunkString(serialised)
-    local total      = #chunks
+    local delayOffset = 0
+    local txCounter  = 0
 
-    -- send chunk 1 immediately so the receiver knows a fresh transmission is starting
-    -- then stagger the rest 0.15s apart so WoW's rate limiter doesn't drop packets
-    local msg1 = playerKey .. SEP .. total .. SEP .. "1" .. SEP .. chunks[1]
-    SendGuild(msg1)
+    -- sort professions so send order is consistent
+    local profNames = {}
+    for name in pairs(snapshot.professions) do table.insert(profNames, name) end
+    table.sort(profNames)
 
-    for i = 2, total do
-        local msg = playerKey .. SEP .. total .. SEP .. i .. SEP .. chunks[i]
-        C_Timer.After((i - 1) * 0.15, function()
-            SendGuild(msg)
-        end)
+    for _, profName in ipairs(profNames) do
+        local prof    = snapshot.professions[profName]
+        local recipes = snapshot.recipes and snapshot.recipes[profName]
+        txCounter     = txCounter + 1
+
+        -- txID is playerKey+number, unique per transmission
+        local txID    = txCounter
+        local chunks  = SendProfession(playerKey, txID, profName, prof, recipes, delayOffset)
+
+        -- next profession starts after this one finishes sending
+        delayOffset = delayOffset + chunks * 0.3 + 0.5
     end
 
-    print("|cff00ccff[WowCraft]|r Syncing " .. profCount .. " profession(s) to the guild (" .. total .. " packets)...")
+    print("|cff00ccff[WowCraft]|r Syncing " .. profCount .. " profession(s) to the guild...")
 end
 
--- Asks online guildmates to broadcast their data.
--- Useful when you first log in and want to populate your database.
+-- Asks online guildmates to broadcast their data
 function WowCraftSync.RequestAllData()
     SendGuild("REQUEST" .. SEP .. WowCraftStorage.GetPlayerKey())
     print("|cff00ccff[WowCraft]|r Requested data from online guild members.")
@@ -234,22 +242,31 @@ end
 -- Receiving
 -- ============================================================
 
-local function ProcessIncomingData(playerKey, serialised)
-    print("|cffff0000[WowCraft DEBUG]|r Processing data from " .. playerKey .. " length: " .. #serialised)
-    local data = Deserialise(serialised)
-    if not data then
-        print("|cff00ccff[WowCraft]|r Got bad data from " .. playerKey .. ", ignoring.")
-        return
+local function ProcessIncomingData(playerKey, data)
+    -- merge into existing stored data rather than overwriting everything
+    -- so receiving Enchanting doesn't wipe previously received Leatherworking
+    local existing = WowCraftStorage.GetMember(playerKey) or { professions = {}, recipes = {} }
+
+    if data.professions then
+        for profName, prof in pairs(data.professions) do
+            existing.professions[profName] = prof
+        end
     end
 
-    WowCraftStorage.SaveMember(playerKey, data)
+    if data.recipes then
+        for profName, recipes in pairs(data.recipes) do
+            existing.recipes[profName] = recipes
+        end
+    end
+
+    WowCraftStorage.SaveMember(playerKey, existing)
 
     local profCount = 0
-    if data.professions then
-        for _ in pairs(data.professions) do profCount = profCount + 1 end
-    end
+    for _ in pairs(existing.professions) do profCount = profCount + 1 end
 
-    print("|cff00ccff[WowCraft]|r Got data from " .. playerKey:match("^([^%-]+)") .. " (" .. profCount .. " profession(s)).")
+    print("|cff00ccff[WowCraft]|r Got data from "
+        .. (playerKey:match("^([^%-]+)") or playerKey)
+        .. " (" .. profCount .. " profession(s) total).")
 
     if WowCraftUI and WowCraftUI.Refresh then
         WowCraftUI.Refresh()
@@ -265,9 +282,10 @@ function WowCraftSync.OnAddonMessage(msg, channel, sender)
         return
     end
 
-    -- parse: playerKey SEP total SEP index SEP chunk
-    local playerKey, total, index, chunk = msg:match(
+    -- parse: playerKey SEP txID SEP total SEP index SEP chunk
+    local playerKey, txID, total, index, chunk = msg:match(
         "^([^" .. SEP .. "]+)" .. SEP ..
+        "([^" .. SEP .. "]+)" .. SEP ..
         "([^" .. SEP .. "]+)" .. SEP ..
         "([^" .. SEP .. "]+)" .. SEP ..
         "(.+)$"
@@ -276,32 +294,37 @@ function WowCraftSync.OnAddonMessage(msg, channel, sender)
     total = tonumber(total)
     index = tonumber(index)
 
-    if not playerKey or not total or not index or not chunk then return end
-    if playerKey == WowCraftStorage.GetPlayerKey() then return end  -- ignore our own broadcasts
+    if not playerKey or not txID or not total or not index or not chunk then return end
+    if playerKey == WowCraftStorage.GetPlayerKey() then return end
 
-    -- chunk 1 always signals a fresh transmission so wipe any stale buffer
+    -- each transmission has its own buffer keyed by playerKey+txID
+    local bufKey = playerKey .. "|" .. txID
     if index == 1 then
-        incoming[playerKey] = { chunks = {}, total = total }
+        incoming[bufKey] = { chunks = {}, total = total }
     end
 
-    if not incoming[playerKey] then
-        incoming[playerKey] = { chunks = {}, total = total }
+    if not incoming[bufKey] then
+        incoming[bufKey] = { chunks = {}, total = total }
     end
 
-    incoming[playerKey].chunks[index] = chunk
+    incoming[bufKey].chunks[index] = chunk
 
-    -- check if we have every chunk
     local received = 0
-    for _ in pairs(incoming[playerKey].chunks) do received = received + 1 end
+    for _ in pairs(incoming[bufKey].chunks) do received = received + 1 end
 
     if received == total then
-        -- reassemble in index order, not insertion order
         local ordered = {}
         for i = 1, total do
-            ordered[i] = incoming[playerKey].chunks[i] or ""
+            ordered[i] = incoming[bufKey].chunks[i] or ""
         end
         local assembled = table.concat(ordered)
-        incoming[playerKey] = nil
-        ProcessIncomingData(playerKey, assembled)
+        incoming[bufKey] = nil
+
+        local data = Deserialise(assembled)
+        if data then
+            ProcessIncomingData(playerKey, data)
+        else
+            print("|cff00ccff[WowCraft]|r Got bad data from " .. playerKey .. ", ignoring.")
+        end
     end
 end
