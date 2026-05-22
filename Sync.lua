@@ -21,7 +21,7 @@ local MAX_CHUNK     = 200
 local SEP           = "\031"  -- ASCII unit separator, won't appear in recipe names
 local SYNC_COOLDOWN = 300     -- 5 min cooldown so nobody accidentally spams the guild
 
-local incoming    = {}  -- chunk buffers keyed by playerKey
+local incoming     = {}  -- chunk buffers keyed by playerKey
 local lastSyncTime = 0
 
 -- ============================================================
@@ -103,7 +103,6 @@ local function Deserialise(str)
     local data = { professions = {}, recipes = {} }
 
     -- split on | but not escaped \|
-    -- we do this by splitting on | then checking for trailing backslash
     local segments = {}
     local current  = ""
     for i = 1, #str do
@@ -142,9 +141,9 @@ local function Deserialise(str)
             }
 
         elseif recordType == "REC" and fields[2] and fields[3] then
-            local profName   = UnescapeString(fields[2])
-            local recipeStr  = fields[3]
-            local recipes    = {}
+            local profName  = UnescapeString(fields[2])
+            local recipeStr = fields[3]
+            local recipes   = {}
 
             -- split recipe list on , but not escaped \,
             local recipeName = ""
@@ -198,11 +197,6 @@ end
 
 function WowCraftSync.BroadcastMyData()
     local now = time()
-    if now - lastSyncTime < SYNC_COOLDOWN then
-        local remaining = SYNC_COOLDOWN - (now - lastSyncTime)
-        print("|cff00ccff[WowCraft]|r Wait " .. remaining .. "s before syncing again.")
-        return
-    end
 
     local snapshot  = WowCraftData.GetLocalSnapshot()
     local profCount = 0
@@ -218,13 +212,16 @@ function WowCraftSync.BroadcastMyData()
     local chunks     = ChunkString(serialised)
     local total      = #chunks
 
+    -- stagger sends by 0.1s each so WoW's rate limiter doesn't drop packets
     for i, chunk in ipairs(chunks) do
         local msg = playerKey .. SEP .. total .. SEP .. i .. SEP .. chunk
-        SendGuild(msg)
+        C_Timer.After(i * 0.1, function()
+            SendGuild(msg)
+        end)
     end
 
     lastSyncTime = now
-    print("|cff00ccff[WowCraft]|r Synced " .. profCount .. " profession(s) to the guild.")
+    print("|cff00ccff[WowCraft]|r Syncing " .. profCount .. " profession(s) to the guild (" .. total .. " packets)...")
 end
 
 -- Asks online guildmates to broadcast their data.
@@ -293,7 +290,7 @@ function WowCraftSync.OnAddonMessage(msg, channel, sender)
     for _ in pairs(incoming[playerKey].chunks) do received = received + 1 end
 
     if received == total then
-        -- sort and join in order, not insertion order
+        -- reassemble in index order, not insertion order
         local ordered = {}
         for i = 1, total do
             ordered[i] = incoming[playerKey].chunks[i] or ""
