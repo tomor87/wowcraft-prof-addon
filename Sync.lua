@@ -19,10 +19,7 @@ WowCraftSync = {}
 local PREFIX        = "WowCraft"
 local MAX_CHUNK     = 200
 local SEP           = "\031"  -- ASCII unit separator, won't appear in recipe names
-local SYNC_COOLDOWN = 300     -- 5 min cooldown so nobody accidentally spams the guild
-
-local incoming     = {}  -- chunk buffers keyed by playerKey
-local lastSyncTime = 0
+local incoming = {}  -- chunk buffers keyed by playerKey
 
 -- ============================================================
 -- Init
@@ -196,7 +193,6 @@ local function SendGuild(msg)
 end
 
 function WowCraftSync.BroadcastMyData()
-    local now = time()
 
     local snapshot  = WowCraftData.GetLocalSnapshot()
     local profCount = 0
@@ -220,7 +216,6 @@ function WowCraftSync.BroadcastMyData()
         end)
     end
 
-    lastSyncTime = now
     print("|cff00ccff[WowCraft]|r Syncing " .. profCount .. " profession(s) to the guild (" .. total .. " packets)...")
 end
 
@@ -236,6 +231,7 @@ end
 -- ============================================================
 
 local function ProcessIncomingData(playerKey, serialised)
+    print("|cffff0000[WowCraft DEBUG]|r Processing data from " .. playerKey .. " length: " .. #serialised)
     local data = Deserialise(serialised)
     if not data then
         print("|cff00ccff[WowCraft]|r Got bad data from " .. playerKey .. ", ignoring.")
