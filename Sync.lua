@@ -275,7 +275,8 @@ function WowCraftSync.OnAddonMessage(msg, channel, sender)
     if not playerKey or not total or not index or not chunk then return end
     if playerKey == WowCraftStorage.GetPlayerKey() then return end  -- ignore our own broadcasts
 
-    if not incoming[playerKey] then
+    -- chunk 1 always means a fresh transmission, clear any stale buffer
+    if index == 1 or not incoming[playerKey] then
         incoming[playerKey] = { chunks = {}, total = total }
     end
 
